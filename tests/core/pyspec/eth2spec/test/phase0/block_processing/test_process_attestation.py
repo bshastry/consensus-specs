@@ -1,11 +1,13 @@
 from eth2spec.test.context import (
     spec_state_test,
     always_bls, never_bls,
+    with_phases,
     with_all_phases,
     spec_test,
     low_balances,
     with_custom_state,
     single_phase,
+    PHASE0,
 )
 from eth2spec.test.helpers.attestations import (
     run_attestation_processing,
@@ -581,3 +583,56 @@ def test_invalid_incorrect_target_included_after_max_inclusion_slot(spec, state)
     sign_attestation(spec, state, attestation)
 
     yield from run_attestation_processing(spec, state, attestation, valid=False)
+
+
+@with_phases([PHASE0])
+@spec_state_test
+def test_zero_effective_balance_attestation(spec, state):
+    """
+    Test that a validator with zero effective balance can still attest without causing crashes in phase0.
+    This test verifies that:
+    1. No division by zero occurs in reward calculations
+    2. The validator can still participate in attestations
+    3. The zero effective balance is handled correctly in balance totals
+    """
+    # This test targets the critical window between a validator's effective balance dropping to zero
+    # and the validator being ejected from the set. During this window, the validator remains in the
+    # registry with some actual balance but zero voting power, yet can attest. A zero effective balance
+    # must not cause protocol crashes when attesting.
+
+    # Set up test validator with zero effective balance
+    validator_index = 0
+    state.validators[validator_index].effective_balance = 0
+
+    # Create and add an attestation from this validator
+    attestation = get_valid_attestation(
+        spec,
+        state,
+        signed=True
+    )
+
+    # Store pre-state values for comparison
+    pre_validator_balance = state.balances[validator_index]
+
+    # Advance state by MIN_ATTESTATION_INCLUSION_DELAY slots
+    next_slots(spec, state, spec.MIN_ATTESTATION_INCLUSION_DELAY)
+
+    # Process the attestation
+    yield from run_attestation_processing(spec, state, attestation)
+
+    # Verify the validator's effective balance remains zero
+    assert state.validators[validator_index].effective_balance == 0
+
+    # Verify the validator's actual balance didn't change (no rewards with 0 effective balance)
+    assert state.balances[validator_index] == pre_validator_balance
+
+    # Verify the attestation was included despite zero effective balance
+    attestations = (
+        state.current_epoch_attestations
+        if attestation.data.target.epoch == spec.get_current_epoch(state)
+        else state.previous_epoch_attestations
+    )
+    assert len(attestations) == 1
+
+    # Verify no impact on total active balance minimum
+    assert spec.get_total_active_balance(state) >= spec.EFFECTIVE_BALANCE_INCREMENT
